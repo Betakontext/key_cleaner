@@ -1,6 +1,6 @@
 ## Key cleaner
 
-#### One-click local tool to scan and (if needed) purge leaked secrets from a Git repository history.
+#### Command line tool to scan and (if needed) purge leaked secrets from a Git repository history.
 :::::::::::::::::::::::::::::
 
 WHAT THIS TOOL DOES
