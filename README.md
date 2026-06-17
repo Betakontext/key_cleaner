@@ -2,6 +2,7 @@
 
 #### One-click local tool to scan and (if needed) purge leaked secrets from a Git repository history.
 :::::::::::::::::::::::::::::
+
 Dry-run scan (no changes):
 
     ./key_cleaner.py --target https://github.com/your/repo.git --exact-key 'your_new_key_here' --scan-commit-messages --verify-only
@@ -9,6 +10,7 @@ Dry-run scan (no changes):
 Full run (will only rewrite if hits were found; add --confirm to skip prompt):
 
     ./key_cleaner.py --target https://github.com/your/repo.git --exact-key 'your_new_key_here' --purge-path .env --scan-commit-messages --confirm
+
 :::::::::::::::::::::::::::::
 
 What this tool does:
