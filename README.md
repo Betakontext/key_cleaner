@@ -30,46 +30,31 @@ SETUP
     pip install git-filter-repo pydantic
     chmod +x key_cleaner.py
 
-Dry-run scan (no changes):
-    
-    python key_cleaner.py \
-    --target /home/cm/Dokumente/Arbeiten/0000_DEV/Python/slAIdshow \
-    --purge-path .env \
-    --purge-path .env.example \
-    --purge-path .env.local \
-    --purge-path .env.production \
-    --purge-path bild.jpg \
-    --exact-key "sk_iFIDaZ4xsL0v4cUwV2JMDBxnEk5dfm9l" \
-    --scan-commit-messages \
-    --verify-only
-
-Full run (will only rewrite if hits were found; add --confirm to skip prompt):
-
-    python key_cleaner.py \
-    --target /home/cm/Dokumente/Arbeiten/0000_DEV/Python/slAIdshow \
-    --purge-path .env \
-    --purge-path .env.example \
-    --purge-path .env.local \
-    --purge-path .env.production \
-    --purge-path bild.jpg \
-    --exact-key "sk_iFIDaZ4xsL0v4cUwV2JMDBxnEk5dfm9l" \
-    --confirm
-
 USAGE QUICKSTART (non-destructive first):
 
-Remote verify-only (includes commit messages):
-  
-      python key_cleaner.py --target https://github.com/org/repo.git \
-        --exact-key 'sk_ABC...' --scan-commit-messages --verify-only
+VERIFY RUN (no changes):
 
 Local verify-only on a path:
   
       python key_cleaner.py --target /home/yourpath/your_repo \
         --exact-key 'sk_ABC...' --scan-commit-messages --verify-only
 
+Remote verify-only (includes commit messages):
+
+      python key_cleaner.py --target https://github.com/org/repo.git \
+        --exact-key 'sk_ABC...' --scan-commit-messages --verify-only
+
+FULL RUN (changes git commit history):
+
+
 Full run on a local path (will rewrite history if hits are found; add --confirm to skip prompt):
   
       python key_cleaner.py --target /home/yourpath/your_repo \
+        --exact-key 'sk_ABC...' --purge-path .env --scan-commit-messages --confirm
+
+Full run on a remote path (will rewrite history if hits are found; add --confirm to skip prompt):
+
+      python key_cleaner.py --target https://github.com/org/repo.git \
         --exact-key 'sk_ABC...' --purge-path .env --scan-commit-messages --confirm
         
 RE-SYNC YOUR LOCAL WORKTREE AFTER A REWRITE
