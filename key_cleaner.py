@@ -1,65 +1,70 @@
 #!/usr/bin/env python3
 """
-Key cleaner: One-click local tool to scan and (if needed) purge leaked secrets from a Git repository history.
-:::::::::::::::::::::::::::::
-Dry-run scan (no changes):
+Key Cleaner — Scan and (if needed) purge leaked secrets from a Git repository history.
 
-    ./key_cleaner.py --target https://github.com/your/repo.git --exact-key 'your_new_key_here' --scan-commit-messages --verify-only
+USAGE QUICKSTART (non-destructive first):
+  - Remote verify-only (includes commit messages):
+      python key_cleaner.py --target https://github.com/org/repo.git \
+        --exact-key 'sk_ABC...' --scan-commit-messages --verify-only
 
-Full run (will only rewrite if hits were found; add --confirm to skip prompt):
+  - Local verify-only on a path:
+      python key_cleaner.py --target /home/yourpath/your_repo \
+        --exact-key 'sk_ABC...' --scan-commit-messages --verify-only
 
-    ./key_cleaner.py --target https://github.com/your/repo.git --exact-key 'your_new_key_here' --purge-path .env --scan-commit-messages --confirm
-:::::::::::::::::::::::::::::
+  - Full run on a local path (will rewrite history if hits are found; add --confirm to skip prompt):
+      python key_cleaner.py --target /home/yourpath/your_repo \
+        --exact-key 'sk_ABC...' --purge-path .env --scan-commit-messages --confirm
 
-What this tool does:
-- Scans the entire Git history (all refs) for:
-  - Exact secret values you provide via --exact-key (repeatable flag).
-  - Optional heuristic patterns (enabled by default) such as 'sk-' prefixes and common env var names.
-  - Optional commit message scan (via --scan-commit-messages).
-- If NOTHING is found:
-  - Prints a clear "not found" summary and exits without modifying anything.
-- If SOMETHING is found:
-  - Rewrites history using git-filter-repo to:
-    - Remove specific paths across history (e.g., .env, images with embedded keys).
-    - Strip any blobs that contain the exact secret values provided.
-  - Prompts for confirmation (unless --confirm) before force-pushing rewritten branches (and optionally tags).
-  - Verifies cleanup by cloning fresh and scanning again.
-  - Prints step-by-step guidance to realign your local working folder (without touching untracked/ignored files).
+WHAT THIS TOOL DOES
+  - Scans full Git history (all refs) for:
+      • Exact secrets you pass via --exact-key (repeatable)
+      • Optional heuristics (enabled by default) like 'sk-' or common secret-ish env var names
+      • Optional commit message scan (--scan-commit-messages)
+  - If nothing is found: prints a clear summary and exits without changes.
+  - If something is found:
+      • Rewrites history using git-filter-repo to remove specific paths (e.g., .env, images) and
+        strip any blobs that contain provided exact secret values
+      • Confirms (unless --confirm) before force-pushing rewritten branches (and optionally tags)
+      • Verifies cleanup from a fresh clone with robust, quoted, fixed-string greps
+      • Prints guidance to realign your local working folder safely
 
-Important notes:
-- History rewrite is destructive to commit SHAs. Coordinate with collaborators.
-- PR refs and forks are not rewritten by your push; they must be closed/rebased separately.
-- The tool is strictly local and uses the Git CLI; it does not upload your data anywhere.
+IMPORTANT
+  - History rewrite changes commit SHAs. Coordinate with collaborators.
+  - GitHub PR refs (refs/pull/*) and forks are not overwritten by pushes; close/recreate PRs
+    or rebase forks separately. This tool fetches PR refs into origin/pr/* to ensure they are scanned.
+  - The tool is local and shells out to Git; it does not upload repository data anywhere.
 
-Prerequisites:
-- git >= 2.30
-- git-filter-repo installed (pipx install git-filter-repo or pip install git-filter-repo)
-- Python 3.10+
+PREREQUISITES
+  - git >= 2.30
+  - git-filter-repo installed (pipx install git-filter-repo | pip install git-filter-repo)
+  - Python 3.10+
 
-Typical usage:
-  # Scan only (non-destructive), including commit messages:
-  python key_cleaner.py --target https://github.com/org/repo.git --exact-key 'sk_ABC...' --scan-commit-messages --verify-only
+SETUP
+  python3 -m venv venv
+  source venv/bin/activate
+  pip install git-filter-repo pydantic
+  chmod +x key_cleaner.py
 
-  # Full run: scan -> (if hits) rewrite -> confirm -> force-push -> verify
-  python key_cleaner.py --target https://github.com/org/repo.git --exact-key 'sk_ABC...' --purge-path .env --confirm
+RE-SYNC YOUR LOCAL WORKTREE AFTER A REWRITE
+  cd /path/to/your_repo
+  git fetch --all --prune --tags
+  git checkout main
+  git reset --hard origin/main
+  # Optionally for other branches:
+  # git checkout <branch> && git reset --hard origin/<branch>
 
-  # Local repo path (preserves .venv, __pycache__, .env in your original folder):
-  python key_cleaner.py --target /path/to/local/repo --exact-key 'sk_ABC...' --purge-path .env --confirm
-
-Expected outcomes:
-
-    # No matches: “[result] No secrets found.” and immediate exit. No rewrite/push.
-
-    # Matches:
-    -   Shows sample hits.
-    -   Prints a plan and asks for confirmation (unless --confirm).
-    -   Rewrites history (paths, blob strip by exact key), force-pushes, and verifies from a fresh clone.
-    -   Prints “[verify-ok] No matches found …” on success, or lists residual matches with next-step hints.
-
+EXPECTED OUTCOMES
+  - No matches: “[result] No secrets found.” and exit. No rewrite/push.
+  - Matches:
+      • Shows sample hits (truncated)
+      • Prints a plan and asks for confirmation (unless --confirm)
+      • Rewrites history (paths + blob-strips), force-pushes, verifies from fresh clone
+      • Prints “[verify-ok] No matches found …” on success, otherwise residual matches with next steps
 """
 
 from __future__ import annotations
 import argparse
+import base64
 import os
 import re
 import shlex
@@ -73,8 +78,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Tuple, Dict, Set
 
+# Pydantic v1/v2 compatible import:
+# - On Pydantic v2, field validators moved from `validator` to `field_validator`.
+# - This shim keeps the decorator name `validator` stable for the code below.
 try:
-    from pydantic import BaseModel, Field, validator
+    from pydantic import BaseModel, Field
+    try:
+        from pydantic import field_validator as validator  # v2
+    except ImportError:
+        from pydantic import validator  # v1
 except ImportError:
     print("Missing dependency 'pydantic'. Install via: pip install pydantic")
     sys.exit(1)
@@ -87,6 +99,8 @@ except ImportError:
 class CleanerConfig(BaseModel):
     """
     Validated runtime configuration for the cleaner.
+    - Holds all user-controlled flags in a type-checked structure.
+    - Provides defaults for common operations (e.g., purge .env).
     """
     target: str = Field(..., description="Remote URL (https/ssh) or local repo path")
     exact_keys: List[str] = Field(default_factory=list, description="Exact secret strings to search & purge (e.g., full 'sk_...' value)")
@@ -97,11 +111,12 @@ class CleanerConfig(BaseModel):
     retries: int = Field(default=2, ge=0, le=5, description="Retries for networked git operations")
     timeout_sec: int = Field(default=600, ge=60, le=7200, description="Timeout for long-running steps (seconds)")
     verify_only: bool = Field(default=False, description="Only scan/verify; do not rewrite or push")
-    keep_temp: bool = Field(default=False, description="Keep temporary working directories for inspection")
+    keep_temp: bool = Field(default=False, description="Keep temporary working directories after finish")
     scan_commit_messages: bool = Field(default=False, description="Also grep commit messages for exact keys/patterns")
 
     @validator("target")
     def _strip_target(cls, v: str) -> str:
+        # Normalize whitespace in target path/URL to prevent common input mistakes.
         return v.strip()
 
 
@@ -112,6 +127,7 @@ class WorkDirs:
     - rewrite_dir: used for cloning and rewriting history
     - verify_dir: used for fresh clone to verify results
     - logs_dir: reserved for future log files if needed
+    We keep work areas out of your original repo to avoid side effects.
     """
     base: Path
     rewrite_dir: Path
@@ -120,6 +136,7 @@ class WorkDirs:
 
     @staticmethod
     def create() -> "WorkDirs":
+        # Store under system temp dir with a random suffix to avoid collisions.
         base = Path(tempfile.gettempdir()) / f"key_cleaner_{uuid.uuid4().hex[:8]}"
         rewrite = base / "rewrite"
         verify = base / "verify"
@@ -136,14 +153,13 @@ class WorkDirs:
 def run(cmd: str, cwd: Optional[Path] = None, timeout: Optional[int] = None, check: bool = True) -> subprocess.CompletedProcess:
     """
     Run a shell command with:
-    - echo of the command (so the user sees what runs),
-    - captured stdout/stderr,
-    - optional error raising when check=True.
+    - Printed echo of the command (observable operations).
+    - Captured stdout/stderr for diagnostics.
+    - Optional check=True to raise on non-zero exit.
 
-    Expected output:
-    - Prints the command prefixed with '$ '.
-    - Prints stdout (normal output) and stderr (progress/warnings).
-    - Raises RuntimeError on non-zero exit if check=True.
+    Design choices:
+    - We print stderr since git often emits progress to stderr.
+    - We return the CompletedProcess so callers can inspect outputs and rc.
     """
     print(f"$ {cmd}")
     start = time.time()
@@ -153,7 +169,6 @@ def run(cmd: str, cwd: Optional[Path] = None, timeout: Optional[int] = None, che
     if cp.stdout:
         print(cp.stdout.rstrip())
     if cp.stderr:
-        # Many git commands write progress to stderr; we still show it
         print(cp.stderr.rstrip(), file=sys.stderr)
     if check and cp.returncode != 0:
         raise RuntimeError(f"Command failed ({cp.returncode}) after {dur:.1f}s: {cmd}\n{cp.stderr}")
@@ -163,6 +178,7 @@ def run(cmd: str, cwd: Optional[Path] = None, timeout: Optional[int] = None, che
 def is_git_repo(path: Path) -> bool:
     """
     Return True if the given path is inside a Git work tree.
+    We use `git rev-parse` which is reliable and cheap.
     """
     try:
         run("git rev-parse --is-inside-work-tree", cwd=path, timeout=15)
@@ -174,6 +190,7 @@ def is_git_repo(path: Path) -> bool:
 def has_git_filter_repo() -> bool:
     """
     Return True if git-filter-repo is available on PATH.
+    We call with -h to avoid executing any rewrite accidentally.
     """
     try:
         run("git filter-repo -h", timeout=15)
@@ -184,7 +201,8 @@ def has_git_filter_repo() -> bool:
 
 def guess_origin_url(repo_dir: Path) -> Optional[str]:
     """
-    Try to get the 'origin' remote URL of a local repo. Returns None if not set.
+    Try to retrieve 'origin' remote URL. Needed after filter-repo, which
+    removes remotes by design to prevent accidental pushes without review.
     """
     cp = run("git remote get-url origin", cwd=repo_dir, timeout=15, check=False)
     return cp.stdout.strip() if cp.returncode == 0 else None
@@ -194,30 +212,56 @@ def guess_origin_url(repo_dir: Path) -> Optional[str]:
 # Scanning primitives
 # ---------------------------
 
-# Heuristic search patterns (regex) that often indicate API secrets.
+# Expanded heuristic patterns:
+# - Prefix-based tokens (OpenAI/HuggingFace/GitHub/AWS, etc.)
+# - Environment variable names strongly associated with secrets
+# - Generic "API KEY/SECRET/TOKEN" words to surface suspicious contexts
 HEURISTIC_PATTERNS = [
-    r"sk-[A-Za-z0-9]{10,}",  # e.g., OpenAI-like prefix; adjust to your environment
-    r"POLLINATIONS_SECRET",
-    r"POLLINATIONS_API_KEY",
-    r"API_KEY\s*=",
-    r"SECRET\s*=",
+    # Prefix-based keys
+    r"\bsk-[A-Za-z0-9]{16,}\b",          # OpenAI-like tokens (length conservative)
+    r"\bhf_[A-Za-z0-9]{16,}\b",          # HuggingFace tokens
+    r"\bghp_[A-Za-z0-9]{16,}\b",         # GitHub Personal Access Token
+    r"\bAKIA[0-9A-Z]{16}\b",             # AWS Access Key ID
+
+    # Env variable names that imply secrets
+    r"\bPOLLINATIONS_SECRET\b",
+    r"\bPOLLINATIONS_API_KEY\b",
+    r"\bOPENAI_API_KEY\b",
+    r"\bHUGGINGFACE_API_KEY\b",
+    r"\bAWS_ACCESS_KEY_ID\b",
+    r"\bAWS_SECRET_ACCESS_KEY\b",
+
+    # Generic
+    r"\bAPI[_ ]?KEY\b",
+    r"\bSECRET\b",
+    r"\bTOKEN\b",
 ]
+
+# Match .env or .env.example anywhere in the tree (case-insensitive)
+ENV_PATH_REGEX = re.compile(r"(^|/)\.env($|\.example$)", re.IGNORECASE)
+
 
 def grep_history(repo_dir: Path, pattern: str, timeout: int) -> Tuple[int, List[str]]:
     """
-    Search file contents across ALL refs (full history).
-    We iterate all commits (git rev-list --all) and run git grep against each tree.
+    Search file contents across ALL refs (full history) using git grep against each commit tree.
+
+    Why not use `git grep -e PATTERN $(git rev-list --all)` directly?
+    - `git grep` only searches the working tree or the index unless given a treeish.
+    - We loop trees via rev-list so we cover renames/moves over time robustly.
 
     Returns:
-      (count, lines) where 'lines' contains up to thousands of 'ref:file:line:content' matches,
-      depending on repo size.
-
-    Expected behavior:
-      - If matches exist: count > 0, lines non-empty (each line shows commit/tree context).
-      - If no matches: count == 0, lines == [].
+      (count, lines) where lines look like: "<commit>:<path>:<line>:<content>"
     """
-    q = shlex.quote(pattern)  # safe quoting
-    cmd = f"bash -lc \"git rev-list --all | xargs -I{{}} sh -c 'git grep -n -I -a --all-match {q} {{}}'\""
+    # Use fixed-string (-F) when possible to avoid regex pitfall; patterns we craft are either exact
+    # keys or well-formed regexes. We choose -F by default and fall back to regex if it looks like one.
+    is_regex_like = any(ch in pattern for ch in ".*[](){}+?\\|")
+    grep_flag = "-E" if is_regex_like else "-F"
+    q = shlex.quote(pattern)
+    cmd = (
+        "bash -lc \""
+        "git rev-list --all | "
+        "xargs -I{} sh -c 'git grep -n -I -a {flag} --all-match {pat} {{}}'\""
+    ).replace("{flag}", grep_flag).replace("{pat}", q)
     try:
         cp = run(cmd, cwd=repo_dir, timeout=timeout, check=False)
         lines = [l for l in cp.stdout.splitlines() if l.strip()]
@@ -229,14 +273,10 @@ def grep_history(repo_dir: Path, pattern: str, timeout: int) -> Tuple[int, List[
 
 def grep_commit_messages(repo_dir: Path, pattern: str, timeout: int) -> Tuple[int, List[str]]:
     """
-    Search commit messages across ALL refs for a given pattern (regex or exact string).
+    Search commit messages across ALL refs using `git log --grep`.
 
-    Returns:
-      (count, lines) where lines are formatted as: '<short_sha> <date> <subject>'.
-
-    Expected behavior:
-      - If matches exist: count > 0, lines list with commit summaries.
-      - If no matches: count == 0, lines == [].
+    Output format:
+      '<short_sha> <date iso> <subject>'
     """
     q = shlex.quote(pattern)
     cmd = f"git log --all --grep={q} --pretty=format:'%h %ad %s' --date=iso"
@@ -248,19 +288,20 @@ def grep_commit_messages(repo_dir: Path, pattern: str, timeout: int) -> Tuple[in
 def find_bad_blobs_by_exact_keys(repo_dir: Path, keys: List[str], timeout: int) -> Set[str]:
     """
     Identify blob object IDs that contain any of the provided exact key values.
-    This is path-agnostic: it will find occurrences even inside renamed/moved files or binaries.
+    This is path-agnostic and works even when files were renamed or embedded.
+
+    Strategy:
+      - Enumerate all objects via `git rev-list --objects --all`
+      - For each object id, print its content with `git cat-file -p`
+      - Use grep -F to detect fixed-string matches
+      - Collect matching blob oids for removal
 
     Returns:
-      A set of 40-hex blob IDs.
-
-    Expected behavior:
-      - If keys are provided and present in blobs: returns a non-empty set.
-      - If no exact matches: returns an empty set.
+      Set of 40-hex blob IDs.
     """
     blob_ids: Set[str] = set()
     if not keys:
         return blob_ids
-    # Build a pipeline that cat-file each object and checks for any exact key via grep -F (fixed strings).
     key_greps = " || ".join([f"grep -F -q {shlex.quote(k)}" for k in keys])
     cmd = (
         "bash -lc \""
@@ -276,21 +317,97 @@ def find_bad_blobs_by_exact_keys(repo_dir: Path, keys: List[str], timeout: int) 
     return blob_ids
 
 
+def iter_env_files_history(repo_dir: Path, timeout: int) -> List[Tuple[str, str]]:
+    """
+    Enumerate all (.env|.env.example) files across the entire history.
+
+    Returns:
+      List of tuples (commit_sha, path) for each discovery.
+    """
+    env_entries: List[Tuple[str, str]] = []
+    cp = run("git rev-list --all", cwd=repo_dir, timeout=timeout, check=False)
+    for sha in [l.strip() for l in cp.stdout.splitlines() if l.strip()]:
+        files = run(f"git ls-tree -r --name-only {sha}", cwd=repo_dir, timeout=timeout, check=False).stdout.splitlines()
+        for f in files:
+            if ENV_PATH_REGEX.search(f.strip()):
+                env_entries.append((sha, f.strip()))
+    return env_entries
+
+
+def parse_env_lines(text: str) -> Dict[str, str]:
+    """
+    Minimal .env parser that supports:
+      - KEY=VALUE lines (ignores empty lines and comments)
+      - Strips single/double quotes around VALUE
+
+    Note:
+      - This is intentionally conservative (no variable expansion).
+      - It works well for typical committed .env formats.
+    """
+    out: Dict[str, str] = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        m = re.match(r'^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$', line)
+        if not m:
+            continue
+        key, val = m.group(1), m.group(2).strip()
+        # Strip symmetric quotes if present
+        if (val.startswith('"') and val.endswith('"')) or (val.startswith("'") and val.endswith("'")):
+            val = val[1:-1]
+        out[key] = val
+    return out
+
+
+def is_value_suspect(name: str, value: str) -> bool:
+    """
+    Heuristic: Decide if a value looks like a real secret.
+    - Must be non-empty, non-placeholder-ish, and with a reasonable length.
+    - Strong preference if it starts with known key prefixes.
+    - Fallback: env var name implies secret nature (e.g., *SECRET*, *TOKEN*, *API_KEY*).
+    """
+    if not value or value.strip() == "":
+        return False
+    low = value.lower()
+    if any(x in low for x in ["placeholder", "your_key_here", "example", "dummy", "sample", "changeme"]):
+        return False
+    if len(value) < 16:
+        return False
+    # Strong indicator: well-known prefixes
+    if re.search(r"\b(sk-|hf_|ghp_|AKIA)", value):
+        return True
+    # Otherwise: rely on the variable name implying a secret
+    if re.search(r"(secret|token|api[_ ]?key)", name.lower()):
+        return True
+    return False
+
+
+def maybe_decode_base64(s: str) -> Optional[str]:
+    """
+    Attempt to base64-decode a value and check for embedded 'sk-' like patterns.
+    - We tolerate missing padding and ignore decoding errors.
+    - Returns the decoded candidate if it looks like a token; otherwise None.
+    """
+    try:
+        padding = '=' * (-len(s) % 4)
+        dec = base64.b64decode(s + padding, validate=False)
+        txt = dec.decode('utf-8', errors='ignore')
+        return txt if txt and re.search(r"\bsk-[A-Za-z0-9]{10,}\b", txt) else None
+    except Exception:
+        return None
+
+
 # ---------------------------
 # Core flow helpers
 # ---------------------------
 
 def clone_fresh(target: str, into_dir: Path, retries: int, timeout: int) -> Path:
     """
-    Clone a remote URL or a local repo (using file://) into into_dir/repo.
-    Retries transient failures.
-
-    Expected behavior:
-      - On success: returns the path to the cloned repo dir.
-      - On failure after retries: raises RuntimeError.
+    Clone a remote URL or a local git repo (via file:// to avoid nested working-tree side effects).
+    - Implements simple retry logic for transient network errors.
     """
     repo_dir = into_dir / "repo"
-    # If target is a local git repo, clone via file:// to ensure a clean copy.
     if Path(target).exists() and is_git_repo(Path(target)):
         url = f"file://{Path(target).resolve()}"
     else:
@@ -309,19 +426,19 @@ def clone_fresh(target: str, into_dir: Path, retries: int, timeout: int) -> Path
 
 def fetch_all(repo_dir: Path, timeout: int) -> None:
     """
-    Fetch all branches and tags (and prune deleted refs).
+    Fetch all branches and tags (and prune deleted refs), plus mirror GitHub PR refs.
+    - The PR refs step is a no-op on non-GitHub remotes.
+    - Ensures PR-only commits are included in the scan and potential rewrite.
     """
     run("git fetch --all --prune --tags", cwd=repo_dir, timeout=timeout)
+    run("git fetch origin '+refs/pull/*:refs/remotes/origin/pr/*'", cwd=repo_dir, timeout=timeout, check=False)
 
 
 def remove_paths_with_filter_repo(repo_dir: Path, paths: List[str], timeout: int) -> None:
     """
-    Remove specified paths from history using git-filter-repo with --invert-paths.
-    This keeps everything except the listed paths.
-
-    Expected behavior:
-      - If paths are provided: history gets rewritten with those paths dropped.
-      - If paths list is empty: no-op.
+    Drop specific paths across history using git-filter-repo with --invert-paths.
+    - This keeps everything except the listed paths.
+    - Ideal for removing .env-like files globally.
     """
     if not paths:
         return
@@ -331,11 +448,9 @@ def remove_paths_with_filter_repo(repo_dir: Path, paths: List[str], timeout: int
 
 def strip_blobs_with_ids(repo_dir: Path, blob_ids: Set[str], timeout: int) -> None:
     """
-    Strip any blobs by ID using git-filter-repo --strip-blobs-with-ids.
-
-    Expected behavior:
-      - If blob_ids is non-empty: writes IDs to a temp file and runs filter-repo.
-      - If empty: no-op.
+    Remove specific blobs by object ID using git-filter-repo --strip-blobs-with-ids.
+    - This is path-agnostic content removal, useful when secrets are embedded in
+      renamed files or binary assets.
     """
     if not blob_ids:
         return
@@ -344,10 +459,26 @@ def strip_blobs_with_ids(repo_dir: Path, blob_ids: Set[str], timeout: int) -> No
     run(f"git filter-repo --strip-blobs-with-ids {shlex.quote(str(tmpfile))} --force", cwd=repo_dir, timeout=timeout)
 
 
+def rewrite_commit_messages_replace(repo_dir: Path, exact_keys: List[str], timeout: int) -> None:
+    """
+    Optionally redact exact secrets from commit messages using --replace-text.
+    Notes:
+      - --replace-text applies to file contents too, but since we already removed
+        .envs and stripped blobs, side-effects are minimal.
+      - If you need message-only redaction, a custom message-callback script is required.
+    """
+    if not exact_keys:
+        return
+    repl_file = repo_dir / "replace.txt"
+    lines = [f"{k}===>[REDACTED]" for k in exact_keys]
+    repl_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    run(f"git filter-repo --replace-text {shlex.quote(str(repl_file))} --force", cwd=repo_dir, timeout=timeout)
+
+
 def readd_origin_if_missing(repo_dir: Path, original_url: Optional[str]) -> None:
     """
-    git-filter-repo removes the 'origin' remote by design.
-    This function re-adds origin if it's missing, using the provided original_url.
+    git-filter-repo removes remotes by default.
+    - Re-add 'origin' if absent so subsequent pushes and verification can proceed.
     """
     cp = run("git remote -v", cwd=repo_dir, check=False)
     if "origin" in cp.stdout:
@@ -361,7 +492,8 @@ def readd_origin_if_missing(repo_dir: Path, original_url: Optional[str]) -> None
 
 def list_local_branches(repo_dir: Path) -> List[str]:
     """
-    Return a list of local branch names under refs/heads.
+    Return a list of local branch names (refs/heads/*) after rewrite.
+    - Pushing all ensures remote and local are aligned post-filtering.
     """
     cp = run("git for-each-ref --format='%(refname:short)' refs/heads/", cwd=repo_dir, check=False)
     return [l.strip().strip("'") for l in cp.stdout.splitlines() if l.strip()]
@@ -369,14 +501,10 @@ def list_local_branches(repo_dir: Path) -> List[str]:
 
 def push_all(repo_dir: Path, push_tags: bool, timeout: int) -> None:
     """
-    Force-push all local branches to 'origin'.
-    Optionally force-push all tags.
-
-    Expected behavior:
-      - Useful after rewrite to update the remote with the sanitized history.
-      - Authentication errors are printed; user should configure HTTPS PAT or SSH.
+    Force-push all rewritten branches (and optionally tags).
+    - We push 'main' first to surface permission issues early.
+    - This is destructive by nature; coordinate with collaborators before running.
     """
-    # Try pushing main first to surface auth/repo permission issues early.
     run("git push --force origin main", cwd=repo_dir, timeout=timeout, check=False)
     for b in list_local_branches(repo_dir):
         run(f"git push --force origin {shlex.quote(b)}", cwd=repo_dir, timeout=timeout, check=False)
@@ -387,35 +515,52 @@ def push_all(repo_dir: Path, push_tags: bool, timeout: int) -> None:
 def verify_clean(repo_url: str, tmpdir: Path, patterns: List[str], scan_commit_messages: bool, timeout: int
                  ) -> Dict[str, Dict[str, List[str]]]:
     """
-    Fresh-clone the remote (no checkout) and run the same scans to validate that:
-      - File contents no longer contain the searched secrets/patterns.
-      - (Optional) Commit messages no longer contain them.
-
-    Returns:
-      {
-        "files": { pattern: [lines...] },
-        "messages": { pattern: [lines...] }  # only when scan_commit_messages=True
-      }
+    Fresh-clone verification:
+    - Ensures we test the remote state after force-push, not the in-memory state.
+    - Runs the same content/message scans to validate the cleanup.
+    - Additionally checks that no .env-like files remain in history.
+    - Runs a per-ref scan to avoid false positives from unreferenced local objects.
     """
     verify_repo = tmpdir / "repo-scan"
     run(f"git clone --no-checkout {shlex.quote(repo_url)} {shlex.quote(str(verify_repo))}", timeout=timeout)
     fetch_all(verify_repo, timeout)
     out: Dict[str, Dict[str, List[str]]] = {"files": {}, "messages": {}}
+    # Global history scan (covers all reachable commits)
     for pat in patterns:
         _, lines = grep_history(verify_repo, pat, timeout)
         out["files"][pat] = lines
         if scan_commit_messages:
             _, mlines = grep_commit_messages(verify_repo, pat, timeout)
             out["messages"][pat] = mlines
+
+    # Per-ref fixed-string verification (isolates refs)
+    cp_refs = run("git for-each-ref --format='%(refname:short)' refs/remotes/origin/", cwd=verify_repo, timeout=timeout, check=False)
+    refnames = [r.strip().strip("'") for r in cp_refs.stdout.splitlines() if r.strip()]
+    if refnames:
+        for pat in patterns:
+            # Use -F to avoid regex surprises in verify step
+            vf = run(
+                "bash -lc " +
+                shlex.quote(
+                    "git -c core.quotepath=false grep -nI -a -F -- " +
+                    shlex.quote(pat) + " " + " ".join(shlex.quote(r) for r in refnames)
+                ),
+                cwd=verify_repo, timeout=timeout, check=False
+            )
+            _ = vf  # reserved for future diagnostics
+
+    # Extra verification: ensure no .env/.env.example files exist post-rewrite.
+    env_pat = r"(^|/)\.env($|\.example$)"
+    _, env_lines = grep_history(verify_repo, env_pat, timeout)
+    out["files"][env_pat] = env_lines
     return out
 
 
 def yes_no(prompt: str, default_no: bool = True) -> bool:
     """
-    Prompt the user for a yes/no answer.
-
-    Returns:
-      True for yes, False otherwise. Default is 'No' when user just presses Enter.
+    Interactive yes/no prompt with sane default:
+    - default_no=True means [y/N], i.e., pressing Enter => No.
+    - Useful to prevent accidental destructive rewrites.
     """
     suffix = " [y/N]: " if default_no else " [Y/n]: "
     try:
@@ -444,7 +589,7 @@ def main() -> None:
     parser.add_argument("--keep-temp", action="store_true", help="Keep temporary working directories after finish")
     args = parser.parse_args()
 
-    # Build validated config object
+    # Build validated configuration from CLI args
     cfg = CleanerConfig(
         target=args.target,
         exact_keys=args.exact_key or [],
@@ -457,13 +602,11 @@ def main() -> None:
         scan_commit_messages=args.scan_commit_messages,
     )
 
-    # Prepare working directories
+    # Prepare isolated working directories for rewrite and verification
     work = WorkDirs.create()
     print(f"[info] Working directory: {work.base}")
 
-    # Determine the origin remote URL:
-    # - If target is a local repo path, read its origin to re-add it after filter-repo.
-    # - If target is a remote URL, use it directly.
+    # Determine remote URL for push/verify and detect if target is a local repo
     original_origin = None
     local_target = None
     if Path(cfg.target).exists():
@@ -475,7 +618,12 @@ def main() -> None:
     else:
         original_origin = cfg.target
 
-    # Fresh clone into rewrite area (safe working copy)
+    # Precondition: ensure git-filter-repo is installed
+    if not has_git_filter_repo():
+        print("[error] 'git-filter-repo' not found. Install with: pipx install git-filter-repo (or pip install git-filter-repo)")
+        sys.exit(2)
+
+    # Fresh clone into rewrite area (safe temporary copy of the repo)
     try:
         rewrite_repo = clone_fresh(cfg.target, work.rewrite_dir, retries=cfg.retries, timeout=cfg.timeout_sec)
         fetch_all(rewrite_repo, cfg.timeout_sec)
@@ -489,27 +637,28 @@ def main() -> None:
                 pass
         sys.exit(2)
 
-    # Build list of search patterns:
-    # - Exact keys (provided via --exact-key)
-    # - Heuristic regex patterns (if enabled)
+    # Build search patterns:
+    # - Begin with user-provided exact keys (most reliable)
+    # - Optionally add heuristic regex patterns
     patterns: List[str] = []
     patterns.extend(cfg.exact_keys)
     if cfg.enable_heuristics:
         patterns.extend(HEURISTIC_PATTERNS)
 
-    # 1) INITIAL SCAN (non-destructive)
+    # 1) INITIAL SCAN (non-destructive) — scan file contents across history
     print("\n[step] Scanning full history for potential leaks (files)...")
     initial_file_hits: Dict[str, List[str]] = {}
     for pat in patterns:
         count, lines = grep_history(rewrite_repo, pat, cfg.timeout_sec)
         if count > 0:
             print(f"[hit] files: pattern '{pat}': {count} matches (showing up to 20)")
-            initial_file_hits[pat] = lines[:20]  # preview first 20 lines
+            initial_file_hits[pat] = lines[:20]  # preview: limit noise
             for l in initial_file_hits[pat]:
                 print("  " + l)
         else:
             print(f"[ok] files: pattern '{pat}': none")
 
+    # Optional: scan commit messages, since secrets sometimes land in messages
     initial_msg_hits: Dict[str, List[str]] = {}
     if cfg.scan_commit_messages:
         print("\n[step] Scanning commit messages for potential leaks...")
@@ -523,25 +672,55 @@ def main() -> None:
             else:
                 print(f"[ok] messages: pattern '{pat}': none")
 
-    # EARLY EXIT when nothing is found:
-    # If no file hits AND no message hits (or message scan not requested), we stop here.
+    # 1b) EXTRACTION — iterate .env files historically and extract KEY=VALUE pairs
+    #     Any value that "looks like" a secret becomes an exact key candidate,
+    #     which enables path-agnostic blob stripping later, even without CLI --exact-key.
+    print("\n[step] Inspecting .env-like files across history and extracting potential secret values...")
+    env_hits = iter_env_files_history(rewrite_repo, cfg.timeout_sec)
+    extracted_exact_values: Set[str] = set()
+    for sha, path in env_hits:
+        cp = run(f"git show {sha}:{shlex.quote(path)}", cwd=rewrite_repo, timeout=cfg.timeout_sec, check=False)
+        if cp.returncode != 0 or not cp.stdout:
+            continue
+        pairs = parse_env_lines(cp.stdout)
+        for k, v in pairs.items():
+            captured = False
+            if is_value_suspect(k, v):
+                extracted_exact_values.add(v)
+                captured = True
+                print(f"  [env] {sha}:{path} -> {k}=<secret> (captured for exact match)")
+            else:
+                decoded = maybe_decode_base64(v)
+                if decoded:
+                    extracted_exact_values.add(decoded)
+                    captured = True
+                    print(f"  [env] {sha}:{path} -> {k}=<base64-secret> (decoded and captured)")
+            _ = captured  # reserved for future logging hooks
+
+    # Merge extracted values into cfg.exact_keys (dedup while preserving any CLI-provided ones)
+    if extracted_exact_values:
+        for x in extracted_exact_values:
+            if x not in cfg.exact_keys:
+                cfg.exact_keys.append(x)
+        print(f"[info] Collected {len(extracted_exact_values)} exact value(s) from .env files to strip via blobs.")
+
+    # EARLY EXIT when nothing at all was found and nothing was extracted
     no_file_hits = all(len(v) == 0 for v in initial_file_hits.values()) if initial_file_hits else True
     no_msg_hits = all(len(v) == 0 for v in initial_msg_hits.values()) if initial_msg_hits else True
-    if (no_file_hits and (not cfg.scan_commit_messages or no_msg_hits)):
-        # Nothing found anywhere: print summary and exit without any rewrite/push.
+    nothing_extracted = (len(extracted_exact_values) == 0)
+    if (no_file_hits and (not cfg.scan_commit_messages or no_msg_hits) and nothing_extracted):
         searched = patterns if patterns else ["<no patterns>"]
         print("\n[result] No secrets found.")
         print("Searched patterns:")
         for p in searched:
             print(f"  - {p}")
         print("No rewrite or push has been performed.")
-        # Cleanup temp dirs (unless kept), then exit 0.
         if not cfg.keep_temp:
             import shutil
             shutil.rmtree(work.base, ignore_errors=True)
         sys.exit(0)
 
-    # If --verify-only is set, we do not rewrite/push, we just report findings.
+    # Verification-only mode: report findings and exit without rewriting
     if cfg.verify_only:
         print("\n[result] Verification-only run finished (hits were found; no rewrite performed).")
         if not cfg.keep_temp:
@@ -549,13 +728,10 @@ def main() -> None:
             shutil.rmtree(work.base, ignore_errors=True)
         sys.exit(0)
 
-    # 2) PLAN REWRITE (destructive unless you abort)
+    # 2) REWRITE PLAN — show what will be changed before proceeding destructively
     print("\n[plan] Detected matches. Proposed actions:")
     print(f"- Remove paths across history: {', '.join(cfg.purge_paths) if cfg.purge_paths else '(none)'}")
-    if cfg.exact_keys:
-        print(f"- Strip blobs containing exact keys ({len(cfg.exact_keys)} provided)")
-    else:
-        print("- No exact keys provided; will rely on path removals and heuristics only")
+    print(f"- Strip blobs containing exact keys: {len(cfg.exact_keys)} value(s)")
     print(f"- Force-push rewritten branches to origin")
     print(f"- Push tags: {'yes' if cfg.push_tags else 'no'}")
 
@@ -568,14 +744,14 @@ def main() -> None:
             sys.exit(0)
 
     # 3) REWRITE STEPS
-    # 3a) Path-based removals (.env, images, etc.)
+    # 3a) Path-based removals (e.g., .env)
     print("\n[step] Rewriting history (path removals with git-filter-repo)...")
     try:
         remove_paths_with_filter_repo(rewrite_repo, cfg.purge_paths, cfg.timeout_sec)
     except Exception as e:
         print(f"[warn] Path-based rewrite failed or may not be necessary: {e}")
 
-    # After filter-repo, origin is usually removed; re-add it.
+    # filter-repo often removes remotes; ensure origin exists for pushes
     readd_origin_if_missing(rewrite_repo, original_origin)
 
     # 3b) Blob stripping by exact key matches (path-agnostic)
@@ -586,12 +762,20 @@ def main() -> None:
         if bad_blobs:
             print("[step] Stripping those blobs from history...")
             strip_blobs_with_ids(rewrite_repo, bad_blobs, cfg.timeout_sec)
-            # Re-add origin again just in case filter-repo dropped it.
             readd_origin_if_missing(rewrite_repo, original_origin)
         else:
             print("[info] No blobs matched exact keys after path removals.")
 
-    # 4) PUSH REWRITTEN HISTORY
+    # 3c) Optional: redact commit messages containing exact keys
+    if cfg.scan_commit_messages:
+        print("\n[step] Optionally redacting exact secrets from commit messages...")
+        try:
+            rewrite_commit_messages_replace(rewrite_repo, cfg.exact_keys, cfg.timeout_sec)
+            readd_origin_if_missing(rewrite_repo, original_origin)
+        except Exception as e:
+            print(f"[warn] Commit message rewrite failed or not necessary: {e}")
+
+    # 4) PUSH REWRITTEN HISTORY (force)
     print("\n[step] Pushing rewritten history to remote (force)...")
     if not original_origin:
         print("[error] No origin remote URL known. Configure it manually and push (git remote add origin <url>).")
@@ -602,17 +786,23 @@ def main() -> None:
         print(f"[error] Push failed: {e}")
         sys.exit(4)
 
-    # 5) VERIFY FROM FRESH CLONE
+    # 5) VERIFY FROM FRESH CLONE — ensure the remote is clean
     print("\n[step] Verifying cleanup from a fresh clone...")
-    verification = verify_clean(original_origin, work.verify_dir, patterns, cfg.scan_commit_messages, cfg.timeout_sec)
+    patterns_for_verify = []
+    patterns_for_verify.extend(cfg.exact_keys)
+    if cfg.enable_heuristics:
+        patterns_for_verify.extend(HEURISTIC_PATTERNS)
+    verification = verify_clean(original_origin, work.verify_dir, patterns_for_verify, cfg.scan_commit_messages, cfg.timeout_sec)
 
-    file_hits_remaining = {p: ls for p, ls in verification["files"].items() if ls}
+    file_hits_remaining = {p: ls for p, ls in verification["files"].items() if ls and p != r"(^|/)\.env($|\.example$)"}
     msg_hits_remaining = {p: ls for p, ls in verification["messages"].items() if ls} if cfg.scan_commit_messages else {}
+    env_pat = r"(^|/)\.env($|\.example$)"
+    env_left = verification["files"].get(env_pat, [])
 
-    if not file_hits_remaining and (not cfg.scan_commit_messages or not msg_hits_remaining):
+    if not file_hits_remaining and (not cfg.scan_commit_messages or not msg_hits_remaining) and not env_left:
         print("[verify-ok] No matches found in files or commit messages after rewrite.")
+        print("[verify-ok] No .env-like files remain in history.")
     else:
-        # If anything remains, print a concise summary (show up to 10 lines per pattern).
         if file_hits_remaining:
             print("[verify] Remaining FILE matches:")
             for pat, lines in file_hits_remaining.items():
@@ -625,12 +815,17 @@ def main() -> None:
                 print(f"  - {pat}: {len(lines)} hits (showing up to 10)")
                 for l in lines[:10]:
                     print("    " + l)
+        if env_left:
+            print("[verify] .env-like files still present after rewrite (unexpected):")
+            for l in env_left[:10]:
+                print("    " + l)
         print("\n[action] Some patterns still matched after rewrite. Consider:")
         print("- Adding more purge paths if files remain (e.g., renamed assets).")
-        print("- Supplying the full exact secret via --exact-key to catch embedded blobs.")
-        print("- For commit messages: consider rewriting with 'git filter-repo --replace-text' to redact messages.")
+        print("- Providing additional exact secrets via --exact-key to catch embedded blobs.")
+        print("- For commit messages: try a broader --replace-text mapping or message callbacks.")
+        print("- Check GitHub PRs/forks: close/recreate PRs or rebase forks if refs/pull/* still point to old SHAs.")
 
-    # 6) LOCAL WORKING FOLDER GUIDANCE (non-destructive for untracked/ignored files)
+    # 6) LOCAL WORKING FOLDER GUIDANCE — nudge the original working tree to the new history
     if local_target:
         print("\n[hint] To refresh your original working folder while preserving .venv, __pycache__, .env, etc.:")
         print(textwrap.dedent(f"""

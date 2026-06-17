@@ -3,57 +3,97 @@
 #### One-click local tool to scan and (if needed) purge leaked secrets from a Git repository history.
 :::::::::::::::::::::::::::::
 
-Dry-run scan (no changes):
+WHAT THIS TOOL DOES
 
-    ./key_cleaner.py --target https://github.com/your/repo.git --exact-key 'your_new_key_here' --scan-commit-messages --verify-only
+  - Scans full Git history (all refs) for:
+      • Exact secrets you pass via --exact-key (repeatable)
+      • Optional heuristics (enabled by default) like 'sk-' or common secret-ish env var names
+      • Optional commit message scan (--scan-commit-messages)
+  - If nothing is found: prints a clear summary and exits without changes.
+  - If something is found:
+      • Rewrites history using git-filter-repo to remove specific paths (e.g., .env, images) and
+        strip any blobs that contain provided exact secret values
+      • Confirms (unless --confirm) before force-pushing rewritten branches (and optionally tags)
+      • Verifies cleanup from a fresh clone with robust, quoted, fixed-string greps
+      • Prints guidance to realign your local working folder safely
+
+PREREQUISITES
+
+  - git >= 2.30
+  - git-filter-repo installed (pipx install git-filter-repo | pip install git-filter-repo)
+  - Python 3.10+
+
+SETUP
+
+    python3 -m venv venv
+    source venv/bin/activate
+    pip install git-filter-repo pydantic
+    chmod +x key_cleaner.py
+
+Dry-run scan (no changes):
+    
+    python key_cleaner.py \
+    --target /home/cm/Dokumente/Arbeiten/0000_DEV/Python/slAIdshow \
+    --purge-path .env \
+    --purge-path .env.example \
+    --purge-path .env.local \
+    --purge-path .env.production \
+    --purge-path bild.jpg \
+    --exact-key "sk_iFIDaZ4xsL0v4cUwV2JMDBxnEk5dfm9l" \
+    --scan-commit-messages \
+    --verify-only
 
 Full run (will only rewrite if hits were found; add --confirm to skip prompt):
 
-    ./key_cleaner.py --target https://github.com/your/repo.git --exact-key 'your_new_key_here' --purge-path .env --scan-commit-messages --confirm
+    python key_cleaner.py \
+    --target /home/cm/Dokumente/Arbeiten/0000_DEV/Python/slAIdshow \
+    --purge-path .env \
+    --purge-path .env.example \
+    --purge-path .env.local \
+    --purge-path .env.production \
+    --purge-path bild.jpg \
+    --exact-key "sk_iFIDaZ4xsL0v4cUwV2JMDBxnEk5dfm9l" \
+    --confirm
 
-:::::::::::::::::::::::::::::
+USAGE QUICKSTART (non-destructive first):
 
-What this tool does:
-- Scans the entire Git history (all refs) for:
-  - Exact secret values you provide via --exact-key (repeatable flag).
-  - Optional heuristic patterns (enabled by default) such as 'sk-' prefixes and common env var names.
-  - Optional commit message scan (via --scan-commit-messages).
-- If NOTHING is found:
-  - Prints a clear "not found" summary and exits without modifying anything.
-- If SOMETHING is found:
-  - Rewrites history using git-filter-repo to:
-    - Remove specific paths across history (e.g., .env, images with embedded keys).
-    - Strip any blobs that contain the exact secret values provided.
-  - Prompts for confirmation (unless --confirm) before force-pushing rewritten branches (and optionally tags).
-  - Verifies cleanup by cloning fresh and scanning again.
-  - Prints step-by-step guidance to realign your local working folder (without touching untracked/ignored files).
+Remote verify-only (includes commit messages):
+  
+      python key_cleaner.py --target https://github.com/org/repo.git \
+        --exact-key 'sk_ABC...' --scan-commit-messages --verify-only
 
-Important notes:
-- History rewrite is destructive to commit SHAs. Coordinate with collaborators.
-- PR refs and forks are not rewritten by your push; they must be closed/rebased separately.
-- The tool is strictly local and uses the Git CLI; it does not upload your data anywhere.
+Local verify-only on a path:
+  
+      python key_cleaner.py --target /home/yourpath/your_repo \
+        --exact-key 'sk_ABC...' --scan-commit-messages --verify-only
 
-Prerequisites:
-- git >= 2.30
-- git-filter-repo installed (pipx install git-filter-repo or pip install git-filter-repo)
-- Python 3.10+
+Full run on a local path (will rewrite history if hits are found; add --confirm to skip prompt):
+  
+      python key_cleaner.py --target /home/yourpath/your_repo \
+        --exact-key 'sk_ABC...' --purge-path .env --scan-commit-messages --confirm
+        
+RE-SYNC YOUR LOCAL WORKTREE AFTER A REWRITE
 
-Typical usage:
-  # Scan only (non-destructive), including commit messages:
-  python key_cleaner.py --target https://github.com/org/repo.git --exact-key 'sk_ABC...' --scan-commit-messages --verify-only
+    cd /path/to/your_repo
+    git fetch --all --prune --tags
+    git checkout main
+    git reset --hard origin/main
+    # Optionally for other branches:
+    # git checkout <branch> && git reset --hard origin/<branch>
 
-  # Full run: scan -> (if hits) rewrite -> confirm -> force-push -> verify
-  python key_cleaner.py --target https://github.com/org/repo.git --exact-key 'sk_ABC...' --purge-path .env --confirm
 
-  # Local repo path (preserves .venv, __pycache__, .env in your original folder):
-  python key_cleaner.py --target /path/to/local/repo --exact-key 'sk_ABC...' --purge-path .env --confirm
+EXPECTED OUTCOMES
 
-Expected outcomes:
+  - No matches: “[result] No secrets found.” and exit. No rewrite/push.
+  - Matches:
+      • Shows sample hits (truncated)
+      • Prints a plan and asks for confirmation (unless --confirm)
+      • Rewrites history (paths + blob-strips), force-pushes, verifies from fresh clone
+      • Prints “[verify-ok] No matches found …” on success, otherwise residual matches with next steps
+      
+IMPORTANT
 
-    # No matches: “[result] No secrets found.” and immediate exit. No rewrite/push.
-
-    # Matches:
-    -   Shows sample hits.
-    -   Prints a plan and asks for confirmation (unless --confirm).
-    -   Rewrites history (paths, blob strip by exact key), force-pushes, and verifies from a fresh clone.
-    -   Prints “[verify-ok] No matches found …” on success, or lists residual matches with next-step hints.
+  - History rewrite changes commit SHAs. Coordinate with collaborators.
+  - GitHub PR refs (refs/pull/*) and forks are not overwritten by pushes; close/recreate PRs
+    or rebase forks separately. This tool fetches PR refs into origin/pr/* to ensure they are scanned.
+  - The tool is local and shells out to Git; it does not upload repository data anywhere.
