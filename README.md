@@ -1,6 +1,6 @@
 ## Key cleaner
 
-#### Command line tool to scan and (if needed) purge leaked secrets from a Git repository history.
+#### Command-line tool to scan and (if needed) purge leaked secrets from a Git repository history.
 :::::::::::::::::::::::::::::
 
 WHAT THIS TOOL DOES
@@ -25,10 +25,20 @@ PREREQUISITES
 
 SETUP
 
+Ubuntu BASH
+
     python3 -m venv venv
     source venv/bin/activate
     pip install git-filter-repo pydantic
     chmod +x key_cleaner.py
+
+Windows PS
+
+    py -3 -m venv venv
+    .\venv\Scripts\Activate.ps1
+    pip install git-filter-repo pydantic
+    Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+    
 
 USAGE QUICKSTART (non-destructive first):
 
@@ -36,12 +46,17 @@ VERIFY RUN (no changes):
 
 Local verify-only on a path:
   
-      python key_cleaner.py --target /home/yourpath/your_repo \
+      python key_cleaner.py --target /home/yourpath/your_repo 
         --exact-key 'sk_ABC...' --scan-commit-messages --verify-only
+
+Windows PS 
+
+    python .\key_cleaner_win.py ` --target "C:\Users\yourpath\your_repo" ` 
+    --exact-key "sk_ABC..." ` --no-heuristics ` --scan-commit-messages ` --verify-only
 
 Remote verify-only (includes commit messages):
 
-      python key_cleaner.py --target https://github.com/org/repo.git \
+      python key_cleaner.py --target https://github.com/org/repo.git 
         --exact-key 'sk_ABC...' --scan-commit-messages --verify-only
 
 FULL RUN (changes git commit history):
@@ -49,12 +64,12 @@ FULL RUN (changes git commit history):
 
 Full run on a local path (will rewrite history if hits are found; add --confirm to skip prompt):
   
-      python key_cleaner.py --target /home/yourpath/your_repo \
+      python key_cleaner.py --target /home/yourpath/your_repo 
         --exact-key 'sk_ABC...' --purge-path .env --scan-commit-messages --confirm
 
 Full run on a remote path (will rewrite history if hits are found; add --confirm to skip prompt):
 
-      python key_cleaner.py --target https://github.com/org/repo.git \
+      python key_cleaner.py --target https://github.com/org/repo.git 
         --exact-key 'sk_ABC...' --purge-path .env --scan-commit-messages --confirm
         
 RE-SYNC YOUR LOCAL WORKTREE AFTER A REWRITE
