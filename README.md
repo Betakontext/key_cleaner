@@ -90,10 +90,38 @@ EXPECTED OUTCOMES
       • Prints a plan and asks for confirmation (unless --confirm)
       • Rewrites history (paths + blob-strips), force-pushes, verifies from fresh clone
       • Prints “[verify-ok] No matches found …” on success, otherwise residual matches with next steps
-      
+
+CLEANUP (optional, f.e. if key_cleaner.py got aborted and left temporary files in TEMP folder)
+
+If you abborted key_cleaner runs you can clean the leftovers from /temp via clean_temp_key_cleaner.py.
+It detects automaticly the right Temp-Verzeichnis (TEMP/TMP/TMPDIR).
+
+Safe mode: -- list first, then delete: with -f.
+
+Windows PowerShell/cmd:
+ 
+    	python clean_temp_key_cleaner.py --list
+    	python clean_temp_key_cleaner.py -f
+
+    	python clean_temp_key_cleaner.py --base "C:\Temp" -f # your path to \Temp, if it is not in the standart System structure
+
+Ubuntu/Linux:
+
+    	python3 clean_temp_key_cleaner.py --list
+    	python3 clean_temp_key_cleaner.py -f
+    	python3 clean_temp_key_cleaner.py --base /tmp -f # your path to \Temp, if it is not in the standart System structure
+    
+Make executable: 
+	
+	chmod +x clean_temp_key_cleaner.py und dann ./clean_temp_key_cleaner.py -f
+
+
+
+
 IMPORTANT
 
   - History rewrite changes commit SHAs. Coordinate with collaborators.
   - GitHub PR refs (refs/pull/*) and forks are not overwritten by pushes; close/recreate PRs
     or rebase forks separately. This tool fetches PR refs into origin/pr/* to ensure they are scanned.
   - The tool is local and shells out to Git; it does not upload repository data anywhere.
+
