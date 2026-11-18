@@ -3,3 +3,7 @@
 venv/
 env/
 ENV/
+
+# Test files
+key_cleaner_tests.txt
+test_key_cleaner.py

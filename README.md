@@ -1,127 +1,155 @@
-## Key cleaner
+### Key Cleaner
 
-#### Command-line tool to scan and (if needed) purge leaked secrets from a Git repository history.
-:::::::::::::::::::::::::::::
+Scan local or remote Git repositories for exact values. Optionally create a separate cleaned mirror.
 
-WHAT THIS TOOL DOES
+**Scan-only by default. No automatic pushes.**
 
-  - Scans full Git history (all refs) for:
-      • Exact secrets you pass via --exact-key (repeatable)
-      • Optional heuristics (enabled by default) like 'sk-' or common secret-ish env var names
-      • Optional commit message scan (--scan-commit-messages)
-  - If nothing is found: prints a clear summary and exits without changes.
-  - If something is found:
-      • Rewrites history using git-filter-repo to remove specific paths (e.g., .env, images) and
-        strip any blobs that contain provided exact secret values
-      • Confirms (unless --confirm) before force-pushing rewritten branches (and optionally tags)
-      • Verifies cleanup from a fresh clone with robust, quoted, fixed-string greps
-      • Prints guidance to realign your local working folder safely
+### Requirements
 
-PREREQUISITES
+- Python 3.10+ recommended
+- Git
+- `git-filter-repo` only for rewriting
 
-  - git >= 2.30
-  - git-filter-repo installed (pipx install git-filter-repo | pip install git-filter-repo)
-  - Python 3.10+
+### Scan a local repository
 
-SETUP
+```bash
+python3 key_cleaner.py \
+  --target /path/to/repository \
+  --exact-key 'VALUE_TO_FIND' \
+  --scan-commit-messages \
+  --no-heuristics \
+  --verify-only
+```
 
-Ubuntu BASH
+Checks reachable historical files, the Git index, and regular working files, including untracked and ignored files. Local scans do not fetch remote updates.
 
-    python3 -m venv venv
-    source venv/bin/activate
-    pip install git-filter-repo pydantic
-    chmod +x key_cleaner.py
+### Scan a remote repository
 
-Windows PS
+```bash
+python3 key_cleaner.py \
+  --target https://github.com/organization/repository.git \
+  --exact-key 'VALUE_TO_FIND' \
+  --scan-commit-messages \
+  --no-heuristics \
+  --verify-only
+```
 
-    py -3 -m venv venv
-    .\venv\Scripts\Activate.ps1
-    pip install git-filter-repo pydantic
-    Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
-    
+Scans a temporary mirror of refs published by the server. Private repositories require configured Git authentication.
 
-USAGE QUICKSTART (non-destructive first):
+### Read search values from a file
 
-VERIFY RUN (no changes):
+Use a UTF-8 file with one value per line, without quotes, comments, or blank lines. Store it outside the scanned repository.
 
-Local verify-only on a path:
-  
-      python key_cleaner.py --target /home/yourpath/your_repo 
-        --exact-key 'sk_ABC...' --scan-commit-messages --verify-only
+```bash
+python3 key_cleaner.py \
+  --target /path/to/repository \
+  --key-file /secure/path/search-values.txt \
+  --scan-commit-messages \
+  --no-heuristics \
+  --verify-only
+```
 
-Windows PS 
+`--exact-key` and `--key-file` are repeatable. Exact values are case-sensitive literal UTF-8 byte sequences, not regex patterns.
 
-    python .\key_cleaner_win.py ` --target "C:\Users\yourpath\your_repo" ` 
-    --exact-key "sk_ABC..." ` --no-heuristics ` --scan-commit-messages ` --verify-only
+### Windows PowerShell
 
-Remote verify-only (includes commit messages):
+Use the same script:
 
-      python key_cleaner.py --target https://github.com/org/repo.git 
-        --exact-key 'sk_ABC...' --scan-commit-messages --verify-only
+```powershell
+py -3 .\key_cleaner.py `
+  --target "C:\Projects\repository" `
+  --key-file "C:\Secure\search-values.txt" `
+  --scan-commit-messages `
+  --no-heuristics `
+  --verify-only
+```
 
-FULL RUN (changes git commit history):
+### Create a cleaned mirror
 
+Install the optional dependency:
 
-Full run on a local path (will rewrite history if hits are found; add --confirm to skip prompt):
-  
-      python key_cleaner.py --target /home/yourpath/your_repo 
-        --exact-key 'sk_ABC...' --purge-path .env --scan-commit-messages --confirm
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install git-filter-repo
+```
 
-Full run on a remote path (will rewrite history if hits are found; add --confirm to skip prompt):
+Create a cleaned copy from a local repository:
 
-      python key_cleaner.py --target https://github.com/org/repo.git 
-        --exact-key 'sk_ABC...' --purge-path .env --scan-commit-messages --confirm
-        
-RE-SYNC YOUR LOCAL WORKTREE AFTER A REWRITE
+```bash
+python key_cleaner.py \
+  --target /path/to/local/repository \
+  --key-file /secure/path/search-values.txt \
+  --scan-commit-messages \
+  --no-heuristics \
+  --rewrite \
+  --output /outside/source/cleaned.git \
+  --confirm
+```
 
-    cd /path/to/your_repo
-    git fetch --all --prune --tags
-    git checkout main
-    git reset --hard origin/main
-    # Optionally for other branches:
-    # git checkout <branch> && git reset --hard origin/<branch>
+The output directory must not exist and should be outside the source repository.
 
+Exact values are replaced with `[REMOVED]`. The generated mirror is checked again. The original repository, working files, and remote remain unchanged. Uncommitted changes are not included.
 
-EXPECTED OUTCOMES
+### Remove historical paths
 
-  - No matches: “[result] No secrets found.” and exit. No rewrite/push.
-  - Matches:
-      • Shows sample hits (truncated)
-      • Prints a plan and asks for confirmation (unless --confirm)
-      • Rewrites history (paths + blob-strips), force-pushes, verifies from fresh clone
-      • Prints “[verify-ok] No matches found …” on success, otherwise residual matches with next steps
+```bash
+python key_cleaner.py \
+  --target /path/to/local/repository \
+  --rewrite \
+  --output /outside/source/cleaned.git \
+  --purge-path .env \
+  --purge-path config/old-credentials.json \
+  --no-heuristics \
+  --confirm
+```
 
-CLEANUP (optional, f.e. if key_cleaner.py got aborted and left temporary files in TEMP folder)
+Paths are repository-relative. Specify previous filenames separately when needed. No paths are removed by default.
 
-If you abborted key_cleaner runs you can clean the leftovers from /temp via clean_temp_key_cleaner.py.
-It detects automaticly the right Temp-Verzeichnis (TEMP/TMP/TMPDIR).
+### Results and exit codes
 
-Safe mode: -- list first, then delete: with -f.
+```text
+HIT exact#1 history blob <object-id> path=b'.env.example'
+Summary: exact_hits=1 heuristic_hints=0
+```
 
-Windows PowerShell/cmd:
- 
-    	python clean_temp_key_cleaner.py --list
-    	python clean_temp_key_cleaner.py -f
+Historical hits are counted per object and search value, not per occurrence or commit. `b'...'` is byte-string notation, not part of the filename.
 
-    	python clean_temp_key_cleaner.py --base "C:\Temp" -f # your path to \Temp, if it is not in the standart System structure
+| Code | Meaning |
+|---|---|
+| `0` | No scan findings, or isolated rewrite verified |
+| `1` | Scan found exact matches or heuristic hints |
+| `2` | Error or invalid invocation; not a clean result |
 
-Ubuntu/Linux:
+Check immediately after execution:
 
-    	python3 clean_temp_key_cleaner.py --list
-    	python3 clean_temp_key_cleaner.py -f
-    	python3 clean_temp_key_cleaner.py --base /tmp -f # your path to \Temp, if it is not in the standart System structure
-    
-Make executable: 
-	
-	chmod +x clean_temp_key_cleaner.py und dann ./clean_temp_key_cleaner.py -f
+```bash
+echo $?
+```
 
+PowerShell:
 
+```powershell
+$LASTEXITCODE
+```
 
+### Important limitations
 
-IMPORTANT
+- No unreachable objects, reflog-only history, hidden remote refs, external LFS data, or submodule contents.
+- Symlinks, nonregular working files, and recognized nested repositories are skipped.
+- Archives are not unpacked; encoded values are not automatically decoded.
+- Shallow repositories and detected partial clones are rejected.
+- Large files and Git objects require corresponding memory.
+- Cleaning a mirror does not clean GitHub, forks, PR refs, or other clones.
+- Rewriting changes history and may invalidate signatures.
 
-  - History rewrite changes commit SHAs. Coordinate with collaborators.
-  - GitHub PR refs (refs/pull/*) and forks are not overwritten by pushes; close/recreate PRs
-    or rebase forks separately. This tool fetches PR refs into origin/pr/* to ensure they are scanned.
-  - The tool is local and shells out to Git; it does not upload repository data anywhere.
+**Rotate or revoke exposed credentials separately. History cleanup does not make exposed values private again.**
 
+### Help
+
+```bash
+python3 key_cleaner.py --help
+```
+_________________
+MIT Licence
+Contact: https://dev.betakontext.de
