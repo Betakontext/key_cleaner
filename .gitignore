@@ -3,7 +3,12 @@
 venv/
 env/
 ENV/
+__pycache__
 
 # Test files
 key_cleaner_tests.txt
 test_key_cleaner.py
+
+# values
+
+values.txt

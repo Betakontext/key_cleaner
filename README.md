@@ -1,155 +1,143 @@
-### Key Cleaner
+### Key Cleaner Interactive
 
-Scan local or remote Git repositories for exact values. Optionally create a separate cleaned mirror.
+Key Cleaner provides an interactive, safety-oriented workflow for finding selected literal values in Git history and, only after explicit confirmation, rewriting and publishing cleaned history.
 
-**Scan-only by default. No automatic pushes.**
+It is intended for sensitive values that were committed by mistake. Rewriting history changes commit IDs; coordinate a pause on pushes with everyone who uses the repository.
 
-### Requirements
+### Project files and setup
 
-- Python 3.10+ recommended
-- Git
-- `git-filter-repo` only for rewriting
+The project uses these files:
 
-### Scan a local repository
+- `key_cleaner.py` — core scanning, filtering, verification, and safeguards.
+- `key_cleaner_interactive.py` — interactive local/URL workflow.
 
-```bash
-python3 key_cleaner.py \
-  --target /path/to/repository \
-  --exact-key 'VALUE_TO_FIND' \
-  --scan-commit-messages \
-  --no-heuristics \
-  --verify-only
-```
-
-Checks reachable historical files, the Git index, and regular working files, including untracked and ignored files. Local scans do not fetch remote updates.
-
-### Scan a remote repository
+From the tool project directory, reuse the existing virtual environment directly. Do not resolve its path with `realpath`.
 
 ```bash
-python3 key_cleaner.py \
-  --target https://github.com/organization/repository.git \
-  --exact-key 'VALUE_TO_FIND' \
-  --scan-commit-messages \
-  --no-heuristics \
-  --verify-only
+.venv/bin/python key_cleaner_interactive.py
 ```
 
-Scans a temporary mirror of refs published by the server. Private repositories require configured Git authentication.
-
-### Read search values from a file
-
-Use a UTF-8 file with one value per line, without quotes, comments, or blank lines. Store it outside the scanned repository.
-
-```bash
-python3 key_cleaner.py \
-  --target /path/to/repository \
-  --key-file /secure/path/search-values.txt \
-  --scan-commit-messages \
-  --no-heuristics \
-  --verify-only
-```
-
-`--exact-key` and `--key-file` are repeatable. Exact values are case-sensitive literal UTF-8 byte sequences, not regex patterns.
-
-### Windows PowerShell
-
-Use the same script:
-
-```powershell
-py -3 .\key_cleaner.py `
-  --target "C:\Projects\repository" `
-  --key-file "C:\Secure\search-values.txt" `
-  --scan-commit-messages `
-  --no-heuristics `
-  --verify-only
-```
-
-### Create a cleaned mirror
-
-Install the optional dependency:
+If setup is new, create the environment and install the required tool:
 
 ```bash
 python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install git-filter-repo
+.venv/bin/python -m pip install git-filter-repo
 ```
 
-Create a cleaned copy from a local repository:
+### Prepare `values.txt`
 
-```bash
-python key_cleaner.py \
-  --target /path/to/local/repository \
-  --key-file /secure/path/search-values.txt \
-  --scan-commit-messages \
-  --no-heuristics \
-  --rewrite \
-  --output /outside/source/cleaned.git \
-  --confirm
-```
+Create a UTF-8 `values.txt` with exactly one literal, case-sensitive value per line.
 
-The output directory must not exist and should be outside the source repository.
+- Do not add blank lines, comments, or quotes.
+- Prefer storing this file outside the repository being scanned.
+- Treat the file itself as sensitive; delete it only after it is no longer needed.
 
-Exact values are replaced with `[REMOVED]`. The generated mirror is checked again. The original repository, working files, and remote remain unchanged. Uncommitted changes are not included.
-
-### Remove historical paths
-
-```bash
-python key_cleaner.py \
-  --target /path/to/local/repository \
-  --rewrite \
-  --output /outside/source/cleaned.git \
-  --purge-path .env \
-  --purge-path config/old-credentials.json \
-  --no-heuristics \
-  --confirm
-```
-
-Paths are repository-relative. Specify previous filenames separately when needed. No paths are removed by default.
-
-### Results and exit codes
+Example:
 
 ```text
-HIT exact#1 history blob <object-id> path=b'.env.example'
-Summary: exact_hits=1 heuristic_hints=0
+example-secret-token
+AKIAEXAMPLEVALUE
 ```
 
-Historical hits are counted per object and search value, not per occurrence or commit. `b'...'` is byte-string notation, not part of the filename.
+### Start an interactive run
 
-| Code | Meaning |
-|---|---|
-| `0` | No scan findings, or isolated rewrite verified |
-| `1` | Scan found exact matches or heuristic hints |
-| `2` | Error or invalid invocation; not a clean result |
+Provide either a local repository path or a GitHub URL when prompted.
 
-Check immediately after execution:
+- For a local repository with an `origin`, the origin is used for the authoritative remote snapshot.
+- Local-only work is not published.
+- Enter the path to `values.txt`; after the directory-input patch described below, a directory containing `values.txt` is also accepted.
+- Hints are advisory only and are not automatically removed.
+
+The dry-run prompt is a safety gate: enter `Y` to proceed. Entering `N` or pressing Enter cancels. A dry run does not change the original repository and does not push, but it does create diagnostic mirrors.
+
+### Review and publication
+
+If exact matches are found on the remote, the interface asks whether to rewrite and publish. The default is `N`; answer `Y` only after reviewing the result and coordinating the rewrite.
+
+With `Y`, the tool rewrites an isolated mirror, verifies it, and publishes branches and tags through its core safeguards. Commit IDs will change. Pause pushes and tell collaborators when they must re-clone or reset their local history.
+
+Do not assume that every remote reference is clean after a head/tag publication. GitHub pull-request refs can retain matches separately from cleaned branches and tags. Investigate residual references before deciding whether any diagnostic or PR-related reference should be removed; there is no blanket assertion that the remote is clean.
+
+### Fresh-clone verification
+
+The interface can request a fresh clone for verification.
+
+- Press Enter to use the suggested path.
+- Supply a new, nonexisting full path to choose another location.
+- Enter `-` to skip the fresh clone.
+
+Scan the fresh clone and use that scan result for review. Do not push an old clone, and do not copy an old `.git` directory into the fresh clone.
+
+### Before cleanup
+
+Complete these prerequisites before removing temporary work:
+
+- Review the publication outcome and all prompts.
+- Scan a fresh clone when applicable.
+- Save or otherwise preserve any local-only changes.
+- Investigate residual refs, including PR-related refs and diagnostic evidence.
+
+Retained directories named `/tmp/key-cleaner-work.*` are not removed automatically. Their original history may still contain sensitive data. Keep them for investigation until the review is complete.
+
+### Safe cleanup of one retained work directory
+
+Use the exact directory printed by the tool, not the illustrative value below. Replace `/tmp/key-cleaner-work.ABC12345` with the actual printed path.
+
+Inspect it first:
 
 ```bash
-echo $?
+cleanup=/tmp/key-cleaner-work.ABC12345
+printf 'Selected cleanup directory: %s\n' "$cleanup"
+ls -ld -- "$cleanup"
+du -sh -- "$cleanup"
 ```
 
-PowerShell:
-
-```powershell
-$LASTEXITCODE
-```
-
-### Important limitations
-
-- No unreachable objects, reflog-only history, hidden remote refs, external LFS data, or submodule contents.
-- Symlinks, nonregular working files, and recognized nested repositories are skipped.
-- Archives are not unpacked; encoded values are not automatically decoded.
-- Shallow repositories and detected partial clones are rejected.
-- Large files and Git objects require corresponding memory.
-- Cleaning a mirror does not clean GitHub, forks, PR refs, or other clones.
-- Rewriting changes history and may invalidate signatures.
-
-**Rotate or revoke exposed credentials separately. History cleanup does not make exposed values private again.**
-
-### Help
+Run this selection prompt **alone** (not pasted together with deletion logic):
 
 ```bash
-python3 key_cleaner.py --help
+read -r -p 'Type the full directory path to delete: ' selected
 ```
-_________________
-MIT Licence
-Contact: https://dev.betakontext.de
+
+Then run the following Bash block only if the selected path is exactly the reviewed cleanup directory. It requires a direct child of `/tmp` whose basename matches `key-cleaner-work.*`, rejects symlinks, and otherwise cancels.
+
+```bash
+cleanup=$selected
+if [ "$cleanup" = "/tmp/key-cleaner-work.ABC12345" ] \
+  && [ "$(dirname -- "$cleanup")" = /tmp ] \
+  && [[ "$(basename -- "$cleanup")" == key-cleaner-work.* ]] \
+  && [ ! -L "$cleanup" ] \
+  && [ -d "$cleanup" ]; then
+  LC_ALL=C rm -rI -- "$cleanup"
+else
+  printf '%s\n' 'Cleanup cancelled: selection did not pass the safety checks.'
+fi
+```
+
+At the `rm -rI` prompt, confirm with English `y` only after rechecking the target. Additional read-only questions are normal. Do not use `sudo`; wait for the prompt rather than bypassing it.
+
+Verify full absence, including the absence of a symlink at that path:
+
+```bash
+if [ ! -e "$cleanup" ] && [ ! -L "$cleanup" ]; then
+  printf '%s\n' 'Cleanup verified: path is absent.'
+else
+  printf '%s\n' 'Cleanup not verified: path still exists or is a symlink.'
+fi
+```
+
+Never delete the project directory, `.venv`, or the fresh clone through this cleanup procedure. Review an old clone separately. Ordinary deletion is not secure erase and does not remove backups or SSD-resident data.
+
+### Appendix: optional directory-input patch
+
+The following instructions describe a patch that may be applied to the existing interactive script; they do not claim that it is already applied. In `run_interactive`, replace the existing input and initial `Path` construction with this logic. Keep subsequent `scan_ns` and `read_keys` processing unchanged.
+
+```python
+key_file_text = ask("Path to values.txt or its directory: ", input_fn).strip()
+key_file = Path(key_file_text).expanduser()
+if key_file.is_dir():
+    key_file = key_file / "values.txt"
+if not key_file.is_file():
+    raise core.Failure("The selected values file is unavailable.")
+```
+
+Use English-only comments if comments are added to this code. The failure message is deliberately generic and safe.
